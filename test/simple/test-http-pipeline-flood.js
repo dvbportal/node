@@ -34,11 +34,16 @@ switch (process.argv[2]) {
 function parent() {
   var http = require('http');
 <<<<<<< HEAD
+<<<<<<< HEAD
   var bigResponse = new Buffer(10240).fill('x');
 =======
   var bigResponse = new Buffer(10240)
   bigResponse.fill('x');
 >>>>>>> b97c28f... http: provide backpressure for pipeline flood
+=======
+  var bigResponse = new Buffer(10240)
+  bigResponse.fill('x');
+>>>>>>> 653d4db... http: provide backpressure for pipeline flood
   var gotTimeout = false;
   var childClosed = false;
   var requests = 0;
@@ -52,6 +57,7 @@ function parent() {
 
   server.on('connection', function(conn) {
     connections++;
+<<<<<<< HEAD
   });
 
   // kill the connection after a bit, verifying that the
@@ -60,12 +66,27 @@ function parent() {
     gotTimeout = true;
     conn.destroy();
   });
+=======
+    // kill the connection after a bit, verifying that the
+    // flood of requests was eventually halted.
+    console.log('got connection');
+    setTimeout(function() {
+      gotTimeout = true;
+      conn.destroy();
+    }, 200);
+  });
+
+>>>>>>> 653d4db... http: provide backpressure for pipeline flood
 
   server.listen(common.PORT, function() {
     var spawn = require('child_process').spawn;
     var args = [__filename, 'child'];
     var child = spawn(process.execPath, args, { stdio: 'inherit' });
+<<<<<<< HEAD
     child.on('close', function(code) {
+=======
+    child.on('exit', function(code) {
+>>>>>>> 653d4db... http: provide backpressure for pipeline flood
       assert(!code);
       childClosed = true;
       server.close();
