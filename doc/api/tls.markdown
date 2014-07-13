@@ -8,11 +8,11 @@ The `tls` module uses OpenSSL to provide Transport Layer Security and/or
 Secure Socket Layer: encrypted stream communication.
 
 TLS/SSL is a public/private key infrastructure. Each client and each
-server must have a private key. A private key is created like this
+server must have a private key. A private key is created like this:
 
     openssl genrsa -out ryans-key.pem 1024
 
-All severs and some clients need to have a certificate. Certificates are public
+All servers and some clients need to have a certificate. Certificates are public
 keys signed by a Certificate Authority or self-signed. The first step to
 getting a certificate is to create a "Certificate Signing Request" (CSR)
 file. This is done with:
@@ -146,9 +146,15 @@ automatically set as a listener for the [secureConnection][] event.  The
     Consult the [OpenSSL cipher list format documentation] for details on the
     format.
 
+    `ECDHE-RSA-AES128-SHA256` and `AES128-GCM-SHA256` are TLS v1.2 ciphers and
+    used when node.js is linked against OpenSSL 1.0.1 or newer, such as the
+    bundled version of OpenSSL.  Note that it is still possible for a TLS v1.2
+    client to negotiate a weaker cipher unless `honorCipherOrder` is enabled.
 
-    `AES128-GCM-SHA256` is used when node.js is linked against OpenSSL 1.0.1
-    or newer and the client speaks TLS 1.2, RC4 is used as a secure fallback.
+    `RC4` is used as a fallback for clients that speak on older version of
+    the TLS protocol.  `RC4` has in recent years come under suspicion and
+    should be considered compromised for anything that is truly sensitive.
+    It is speculated that state-level actors posess the ability to break it.
 
     **NOTE**: Previous revisions of this section suggested `AES256-SHA` as an
     acceptable cipher. Unfortunately, `AES256-SHA` is a CBC cipher and therefore
@@ -168,12 +174,13 @@ automatically set as a listener for the [secureConnection][] event.  The
   - `honorCipherOrder` : When choosing a cipher, use the server's preferences
     instead of the client preferences.
 
-    Note that if SSLv2 is used, the server will send its list of preferences
-    to the client, and the client chooses the cipher.
-
     Although, this option is disabled by default, it is *recommended* that you
     use this option in conjunction with the `ciphers` option to mitigate
     BEAST attacks.
+
+    Note: If SSLv2 is used, the server will send its list of preferences to the
+    client, and the client chooses the cipher.  Support for SSLv2 is disabled
+    unless node.js was configured with `./configure --with-sslv2`.
 
   - `requestCert`: If `true` the server will request a certificate from
     clients that connect and attempt to verify that certificate. Default:
@@ -190,13 +197,19 @@ automatically set as a listener for the [secureConnection][] event.  The
     supports SNI TLS extension. Two argument will be passed to it: `servername`,
     and `cb`. `SNICallback` should invoke `cb(null, ctx)`, where `ctx` is a
     SecureContext instance.
-    (You can use `crypto.createCredentials(...).context` to get proper
+    (You can use `tls.createSecureContext(...)` to get proper
     SecureContext). If `SNICallback` wasn't provided - default callback with
     high-level API will be used (see below).
 
   - `sessionTimeout`: An integer specifying the seconds after which TLS
     session identifiers and TLS session tickets created by the server are
     timed out. See [SSL_CTX_set_timeout] for more details.
+
+  - `ticketKeys`: A 48-byte `Buffer` instance consisting of 16-byte prefix,
+    16-byte hmac key, 16-byte AES key. You could use it to accept tls session
+    tickets on multiple instances of tls server.
+
+    NOTE: Automatically shared between `cluster` module workers.
 
   - `sessionIdContext`: A string containing a opaque identifier for session
     resumption. If `requestCert` is `true`, the default is MD5 hash value
@@ -277,8 +290,11 @@ Creates a new client connection to the given `port` and `host` (old API) or
     creating a new socket. If this option is specified, `host` and `port`
     are ignored.
 
+  - `path`: Creates unix socket connection to path. If this option is
+    specified, `host` and `port` are ignored.
+
   - `pfx`: A string or `Buffer` containing the private key, certificate and
-    CA certs of the server in PFX or PKCS12 format.
+    CA certs of the client in PFX or PKCS12 format.
 
   - `key`: A string or `Buffer` containing the private key of the client in
     PEM format.
@@ -306,6 +322,8 @@ Creates a new client connection to the given `port` and `host` (old API) or
   - `secureProtocol`: The SSL method to use, e.g. `SSLv3_method` to force
     SSL version 3. The possible values depend on your installation of
     OpenSSL and are defined in the constant [SSL_METHODS][].
+
+  - `session`: A `Buffer` instance, containing TLS session.
 
 The `callback` parameter will be added as a listener for the
 ['secureConnect'][] event.
@@ -376,8 +394,8 @@ Construct a new TLSSocket object from existing TCP socket.
 
 `options` is an object that might contain following properties:
 
-  - `credentials`: An optional credentials object from
-     `crypto.createCredentials( ... )`
+  - `secureContext`: An optional TLS context object from
+     `tls.createSecureContext( ... )`
 
   - `isServer`: If true - TLS socket will be instantiated in server-mode
 
@@ -391,7 +409,43 @@ Construct a new TLSSocket object from existing TCP socket.
 
   - `SNICallback`: Optional, see [tls.createServer][]
 
-## tls.createSecurePair([credentials], [isServer], [requestCert], [rejectUnauthorized])
+  - `session`: Optional, a `Buffer` instance, containing TLS session
+
+  - `requestOCSP`: Optional, if `true` - OCSP status request extension would
+    be added to client hello, and `OCSPResponse` event will be emitted on socket
+    before establishing secure communication
+
+
+## tls.createSecureContext(details)
+
+Stability: 0 - Deprecated. Use tls.createSecureContext instead.
+
+Creates a credentials object, with the optional details being a
+dictionary with keys:
+
+* `pfx` : A string or buffer holding the PFX or PKCS12 encoded private
+  key, certificate and CA certificates
+* `key` : A string holding the PEM encoded private key
+* `passphrase` : A string of passphrase for the private key or pfx
+* `cert` : A string holding the PEM encoded certificate
+* `ca` : Either a string or list of strings of PEM encoded CA
+  certificates to trust.
+* `crl` : Either a string or list of strings of PEM encoded CRLs
+  (Certificate Revocation List)
+* `ciphers`: A string describing the ciphers to use or exclude.
+  Consult
+  <http://www.openssl.org/docs/apps/ciphers.html#CIPHER_LIST_FORMAT>
+  for details on the format.
+* `honorCipherOrder` : When choosing a cipher, use the server's preferences
+  instead of the client preferences. For further details see `tls` module
+  documentation.
+
+If no 'ca' details are given, then node.js will use the default
+publicly trusted list of CAs as given in
+<http://mxr.mozilla.org/mozilla/source/security/nss/lib/ckfw/builtins/certdata.txt>.
+
+
+## tls.createSecurePair([context], [isServer], [requestCert], [rejectUnauthorized])
 
     Stability: 0 - Deprecated. Use tls.TLSSocket instead.
 
@@ -400,7 +454,7 @@ encrypted data, and one reads/writes cleartext data.
 Generally the encrypted one is piped to/from an incoming encrypted data stream,
 and the cleartext one is used as a replacement for the initial encrypted stream.
 
- - `credentials`: A credentials object from crypto.createCredentials( ... )
+ - `credentials`: A secure context object from tls.createSecureContext( ... )
 
  - `isServer`: A boolean indicating whether this tls connection should be
    opened as a server or a client.
@@ -467,10 +521,11 @@ established - it will be forwarded here.
 
 ### Event: 'newSession'
 
-`function (sessionId, sessionData) { }`
+`function (sessionId, sessionData, callback) { }`
 
 Emitted on creation of TLS session. May be used to store sessions in external
-storage.
+storage. `callback` must be invoked eventually, otherwise no data will be
+sent or received from secure connection.
 
 NOTE: adding this event listener will have an effect only on connections
 established after addition of event listener.
@@ -488,6 +543,44 @@ perform lookup in external storage using given `sessionId`, and invoke
 
 NOTE: adding this event listener will have an effect only on connections
 established after addition of event listener.
+
+
+### Event: 'OCSPRequest'
+
+`function (certificate, issuer, callback) { }`
+
+Emitted when the client sends a certificate status request. You could parse
+server's current certificate to obtain OCSP url and certificate id, and after
+obtaining OCSP response invoke `callback(null, resp)`, where `resp` is a
+`Buffer` instance. Both `certificate` and `issuer` are a `Buffer`
+DER-representations of the primary and issuer's certificates. They could be used
+to obtain OCSP certificate id and OCSP endpoint url.
+
+Alternatively, `callback(null, null)` could be called, meaning that there is no
+OCSP response.
+
+Calling `callback(err)` will result in a `socket.destroy(err)` call.
+
+Typical flow:
+
+1. Client connects to server and sends `OCSPRequest` to it (via status info
+   extension in ClientHello.)
+2. Server receives request and invokes `OCSPRequest` event listener if present
+3. Server grabs OCSP url from either `certificate` or `issuer` and performs an
+   [OCSP request] to the CA
+4. Server receives `OCSPResponse` from CA and sends it back to client via
+   `callback` argument
+5. Client validates the response and either destroys socket or performs a
+   handshake.
+
+NOTE: `issuer` could be null, if certficiate is self-signed or if issuer is not
+in the root certificates list. (You could provide an issuer via `ca` option.)
+
+NOTE: adding this event listener will have an effect only on connections
+established after addition of event listener.
+
+NOTE: you may want to use some npm module like [asn1.js] to parse the
+certificates.
 
 
 ### server.listen(port, [host], [callback])
@@ -514,11 +607,12 @@ Returns the bound address, the address family name and port of the
 server as reported by the operating system.  See [net.Server.address()][] for
 more information.
 
-### server.addContext(hostname, credentials)
+### server.addContext(hostname, context)
 
 Add secure context that will be used if client request's SNI hostname is
-matching passed `hostname` (wildcards can be used). `credentials` can contain
-`key`, `cert` and `ca`.
+matching passed `hostname` (wildcards can be used). `context` can contain
+`key`, `cert`, `ca` and/or any other properties from `tls.createSecureContext`
+`options` argument.
 
 ### server.maxConnections
 
@@ -559,6 +653,16 @@ If `tlsSocket.authorized === false` then the error can be found in
 `tlsSocket.authorizationError`. Also if NPN was used - you can check
 `tlsSocket.npnProtocol` for negotiated protocol.
 
+### Event: 'OCSPResponse'
+
+`function (response) { }`
+
+This event will be emitted if `requestOCSP` option was set. `response` is a
+buffer object, containing server's OCSP response.
+
+Traditionally, the `response` is a signed object from the server's CA that
+contains information about server's certificate revocation status.
+
 ### tlsSocket.encrypted
 
 Static boolean value, always `true`. May be used to distinguish TLS sockets
@@ -574,27 +678,32 @@ specified CAs, otherwise `false`
 The reason why the peer's certificate has not been verified. This property
 becomes available only when `tlsSocket.authorized === false`.
 
-### tlsSocket.getPeerCertificate()
+### tlsSocket.getPeerCertificate([ detailed ])
 
 Returns an object representing the peer's certificate. The returned object has
-some properties corresponding to the field of the certificate.
+some properties corresponding to the field of the certificate. If `detailed`
+argument is `true` - the full chain with `issuer` property will be returned,
+if `false` - only the top certificate without `issuer` property.
 
 Example:
 
-    { subject: 
+    { subject:
        { C: 'UK',
          ST: 'Acknack Ltd',
          L: 'Rhys Jones',
          O: 'node.js',
          OU: 'Test TLS Certificate',
          CN: 'localhost' },
-      issuer: 
+      issuerInfo:
        { C: 'UK',
          ST: 'Acknack Ltd',
          L: 'Rhys Jones',
          O: 'node.js',
          OU: 'Test TLS Certificate',
          CN: 'localhost' },
+      issuer:
+       { ... another certificate ... },
+      raw: < RAW DER buffer >,
       valid_from: 'Nov 11 09:52:22 2009 GMT',
       valid_to: 'Nov  6 09:52:22 2029 GMT',
       fingerprint: '2A:7A:C2:DD:E5:F9:CC:53:72:35:99:7A:02:5A:71:38:52:EC:8A:DF',
@@ -626,6 +735,30 @@ has been established.
 
 ANOTHER NOTE: When running as the server, socket will be destroyed
 with an error after `handshakeTimeout` timeout.
+
+### tlsSocket.setMaxSendFragment(size)
+
+Set maximum TLS fragment size (default and maximum value is: `16384`, minimum
+is: `512`). Returns `true` on success, `false` otherwise.
+
+Smaller fragment size decreases buffering latency on the client: large
+fragments are buffered by the TLS layer until the entire fragment is received
+and its integrity is verified; large fragments can span multiple roundtrips,
+and their processing can be delayed due to packet loss or reordering. However,
+smaller fragments add extra TLS framing bytes and CPU overhead, which may
+decrease overall server throughput.
+
+### tlsSocket.getSession()
+
+Return ASN.1 encoded TLS session or `undefined` if none was negotiated. Could
+be used to speed up handshake establishment when reconnecting to the server.
+
+### tlsSocket.getTLSTicket()
+
+NOTE: Works only with client TLS sockets. Useful only for debugging, for
+session reuse provide `session` option to `tls.connect`.
+
+Return TLS session ticket or `undefined` if none was negotiated.
 
 ### tlsSocket.address()
 
@@ -669,3 +802,5 @@ The numeric representation of the local port.
 [Forward secrecy]: http://en.wikipedia.org/wiki/Perfect_forward_secrecy
 [DHE]: https://en.wikipedia.org/wiki/Diffie%E2%80%93Hellman_key_exchange
 [ECDHE]: https://en.wikipedia.org/wiki/Elliptic_curve_Diffie%E2%80%93Hellman
+[asn1.js]: http://npmjs.org/package/asn1.js
+[OCSP request]: http://en.wikipedia.org/wiki/OCSP_stapling

@@ -36,8 +36,10 @@
 
 namespace node {
 
+using v8::EscapableHandleScope;
 using v8::Handle;
 using v8::HandleScope;
+using v8::Isolate;
 using v8::Local;
 using v8::String;
 using v8::Value;
@@ -48,7 +50,8 @@ class ExternString: public ResourceType {
   public:
     ~ExternString() {
       delete[] data_;
-      node_isolate->AdjustAmountOfExternalAllocatedMemory(-length_);
+      int64_t change_in_bytes = -static_cast<int64_t>(length_);
+      isolate()->AdjustAmountOfExternalAllocatedMemory(change_in_bytes);
     }
 
     const TypeName* data() const {
@@ -59,37 +62,46 @@ class ExternString: public ResourceType {
       return length_;
     }
 
-    static Local<String> NewFromCopy(const TypeName* data, size_t length) {
-      HandleScope scope(node_isolate);
+    static Local<String> NewFromCopy(Isolate* isolate,
+                                     const TypeName* data,
+                                     size_t length) {
+      EscapableHandleScope scope(isolate);
 
       if (length == 0)
-        return scope.Close(String::Empty(node_isolate));
+        return scope.Escape(String::Empty(isolate));
 
       TypeName* new_data = new TypeName[length];
       memcpy(new_data, data, length * sizeof(*new_data));
 
-      return scope.Close(ExternString<ResourceType, TypeName>::New(new_data,
-                                                                   length));
+      return scope.Escape(ExternString<ResourceType, TypeName>::New(isolate,
+                                                                    new_data,
+                                                                    length));
     }
 
     // uses "data" for external resource, and will be free'd on gc
-    static Local<String> New(const TypeName* data, size_t length) {
-      HandleScope scope(node_isolate);
+    static Local<String> New(Isolate* isolate,
+                             const TypeName* data,
+                             size_t length) {
+      EscapableHandleScope scope(isolate);
 
       if (length == 0)
-        return scope.Close(String::Empty(node_isolate));
+        return scope.Escape(String::Empty(isolate));
 
-      ExternString* h_str = new ExternString<ResourceType, TypeName>(data,
+      ExternString* h_str = new ExternString<ResourceType, TypeName>(isolate,
+                                                                     data,
                                                                      length);
-      Local<String> str = String::NewExternal(h_str);
-      node_isolate->AdjustAmountOfExternalAllocatedMemory(length);
+      Local<String> str = String::NewExternal(isolate, h_str);
+      isolate->AdjustAmountOfExternalAllocatedMemory(length);
 
-      return scope.Close(str);
+      return scope.Escape(str);
     }
 
+    inline Isolate* isolate() const { return isolate_; }
+
   private:
-    ExternString(const TypeName* data, size_t length)
-      : data_(data), length_(length) { }
+    ExternString(Isolate* isolate, const TypeName* data, size_t length)
+      : isolate_(isolate), data_(data), length_(length) { }
+    Isolate* isolate_;
     const TypeName* data_;
     size_t length_;
 };
@@ -244,7 +256,8 @@ size_t hex_decode(char* buf,
 }
 
 
-bool StringBytes::GetExternalParts(Handle<Value> val,
+bool StringBytes::GetExternalParts(Isolate* isolate,
+                                   Handle<Value> val,
                                    const char** data,
                                    size_t* len) {
   if (Buffer::HasInstance(val)) {
@@ -277,16 +290,19 @@ bool StringBytes::GetExternalParts(Handle<Value> val,
 }
 
 
-size_t StringBytes::Write(char* buf,
+size_t StringBytes::Write(Isolate* isolate,
+                          char* buf,
                           size_t buflen,
                           Handle<Value> val,
                           enum encoding encoding,
                           int* chars_written) {
-  HandleScope scope(node_isolate);
-  const char* data;
+  HandleScope scope(isolate);
+  const char* data = NULL;
   size_t len = 0;
-  bool is_extern = GetExternalParts(val, &data, &len);
+  bool is_extern = GetExternalParts(isolate, val, &data, &len);
+  size_t extlen = len;
 
+  CHECK(val->IsString() == true);
   Local<String> str = val.As<String>();
   len = len < buflen ? len : buflen;
 
@@ -310,9 +326,11 @@ size_t StringBytes::Write(char* buf,
 
     case UTF8:
       if (is_extern)
+        // TODO(tjfontaine) should this validate invalid surrogate pairs as
+        // well?
         memcpy(buf, data, len);
       else
-        len = str->WriteUtf8(buf, buflen, chars_written, flags);
+        len = str->WriteUtf8(buf, buflen, chars_written, WRITE_UTF8_FLAGS);
       break;
 
     case UCS2:
@@ -320,6 +338,16 @@ size_t StringBytes::Write(char* buf,
         memcpy(buf, data, len * 2);
       else
         len = str->Write(reinterpret_cast<uint16_t*>(buf), 0, buflen, flags);
+      if (IsBigEndian()) {
+        // Node's "ucs2" encoding wants LE character data stored in
+        // the Buffer, so we need to reorder on BE platforms.  See
+        // http://nodejs.org/api/buffer.html regarding Node's "ucs2"
+        // encoding specification
+        uint16_t* buf16 = reinterpret_cast<uint16_t*>(buf);
+        for (size_t i = 0; i < len; i++) {
+          buf16[i] = (buf16[i] << 8) | (buf16[i] >> 8);
+        }
+      }
       if (chars_written != NULL)
         *chars_written = len;
       len = len * sizeof(uint16_t);
@@ -327,7 +355,7 @@ size_t StringBytes::Write(char* buf,
 
     case BASE64:
       if (is_extern) {
-        base64_decode(buf, buflen, data, len);
+        len = base64_decode(buf, buflen, data, extlen);
       } else {
         String::Value value(str);
         len = base64_decode(buf, buflen, *value, value.length());
@@ -339,7 +367,7 @@ size_t StringBytes::Write(char* buf,
 
     case HEX:
       if (is_extern) {
-        hex_decode(buf, buflen, data, len);
+        len = hex_decode(buf, buflen, data, extlen);
       } else {
         String::Value value(str);
         len = hex_decode(buf, buflen, *value, value.length());
@@ -358,7 +386,9 @@ size_t StringBytes::Write(char* buf,
 }
 
 
-bool StringBytes::IsValidString(Handle<String> string, enum encoding enc) {
+bool StringBytes::IsValidString(Isolate* isolate,
+                                Handle<String> string,
+                                enum encoding enc) {
   if (enc == HEX && string->Length() % 2 != 0)
     return false;
   // TODO(bnoordhuis) Add BASE64 check?
@@ -369,8 +399,10 @@ bool StringBytes::IsValidString(Handle<String> string, enum encoding enc) {
 // Quick and dirty size calculation
 // Will always be at least big enough, but may have some extra
 // UTF8 can be as much as 3x the size, Base64 can have 1-2 extra bytes
-size_t StringBytes::StorageSize(Handle<Value> val, enum encoding encoding) {
-  HandleScope scope(node_isolate);
+size_t StringBytes::StorageSize(Isolate* isolate,
+                                Handle<Value> val,
+                                enum encoding encoding) {
+  HandleScope scope(isolate);
   size_t data_size = 0;
   bool is_buffer = Buffer::HasInstance(val);
 
@@ -416,8 +448,10 @@ size_t StringBytes::StorageSize(Handle<Value> val, enum encoding encoding) {
 }
 
 
-size_t StringBytes::Size(Handle<Value> val, enum encoding encoding) {
-  HandleScope scope(node_isolate);
+size_t StringBytes::Size(Isolate* isolate,
+                         Handle<Value> val,
+                         enum encoding encoding) {
+  HandleScope scope(isolate);
   size_t data_size = 0;
   bool is_buffer = Buffer::HasInstance(val);
 
@@ -425,7 +459,7 @@ size_t StringBytes::Size(Handle<Value> val, enum encoding encoding) {
     return Buffer::Length(val);
 
   const char* data;
-  if (GetExternalParts(val, &data, &data_size))
+  if (GetExternalParts(isolate, val, &data, &data_size))
     return data_size;
 
   Local<String> str = val->ToString();
@@ -493,7 +527,8 @@ static bool contains_non_ascii(const char* src, size_t len) {
   }
 
 
-#if defined(__x86_64__) || defined(_WIN64)
+#if defined(__x86_64__) || defined(_WIN64) || defined(__PPC64__) ||           \
+    defined(_ARCH_PPC64)
   const uintptr_t mask = 0x8080808080808080ll;
 #else
   const uintptr_t mask = 0x80808080l;
@@ -548,7 +583,8 @@ static void force_ascii(const char* src, char* dst, size_t len) {
     }
   }
 
-#if defined(__x86_64__) || defined(_WIN64)
+#if defined(__x86_64__) || defined(_WIN64) || defined(__PPC64__) ||           \
+    defined(_ARCH_PPC64)
   const uintptr_t mask = ~0x8080808080808080ll;
 #else
   const uintptr_t mask = ~0x80808080l;
@@ -651,40 +687,41 @@ static size_t hex_encode(const char* src, size_t slen, char* dst, size_t dlen) {
 
 
 
-Local<Value> StringBytes::Encode(const char* buf,
+Local<Value> StringBytes::Encode(Isolate* isolate,
+                                 const char* buf,
                                  size_t buflen,
                                  enum encoding encoding) {
-  HandleScope scope(node_isolate);
+  EscapableHandleScope scope(isolate);
 
   assert(buflen <= Buffer::kMaxLength);
   if (!buflen && encoding != BUFFER)
-    return scope.Close(String::Empty(node_isolate));
+    return scope.Escape(String::Empty(isolate));
 
   Local<String> val;
   switch (encoding) {
     case BUFFER:
-      return scope.Close(Buffer::New(buf, buflen));
+      return scope.Escape(Buffer::New(buf, buflen));
 
     case ASCII:
       if (contains_non_ascii(buf, buflen)) {
         char* out = new char[buflen];
         force_ascii(buf, out, buflen);
         if (buflen < EXTERN_APEX) {
-          val = OneByteString(node_isolate, out, buflen);
+          val = OneByteString(isolate, out, buflen);
           delete[] out;
         } else {
-          val = ExternOneByteString::New(out, buflen);
+          val = ExternOneByteString::New(isolate, out, buflen);
         }
       } else {
         if (buflen < EXTERN_APEX)
-          val = OneByteString(node_isolate, buf, buflen);
+          val = OneByteString(isolate, buf, buflen);
         else
-          val = ExternOneByteString::NewFromCopy(buf, buflen);
+          val = ExternOneByteString::NewFromCopy(isolate, buf, buflen);
       }
       break;
 
     case UTF8:
-      val = String::NewFromUtf8(node_isolate,
+      val = String::NewFromUtf8(isolate,
                                 buf,
                                 String::kNormalString,
                                 buflen);
@@ -692,9 +729,9 @@ Local<Value> StringBytes::Encode(const char* buf,
 
     case BINARY:
       if (buflen < EXTERN_APEX)
-        val = OneByteString(node_isolate, buf, buflen);
+        val = OneByteString(isolate, buf, buflen);
       else
-        val = ExternOneByteString::NewFromCopy(buf, buflen);
+        val = ExternOneByteString::NewFromCopy(isolate, buf, buflen);
       break;
 
     case BASE64: {
@@ -705,23 +742,37 @@ Local<Value> StringBytes::Encode(const char* buf,
       assert(written == dlen);
 
       if (dlen < EXTERN_APEX) {
-        val = OneByteString(node_isolate, dst, dlen);
+        val = OneByteString(isolate, dst, dlen);
         delete[] dst;
       } else {
-        val = ExternOneByteString::New(dst, dlen);
+        val = ExternOneByteString::New(isolate, dst, dlen);
       }
       break;
     }
 
     case UCS2: {
       const uint16_t* out = reinterpret_cast<const uint16_t*>(buf);
+      uint16_t* dst = NULL;
+      if (IsBigEndian()) {
+        // Node's "ucs2" encoding expects LE character data inside a
+        // Buffer, so we need to reorder on BE platforms.  See
+        // http://nodejs.org/api/buffer.html regarding Node's "ucs2"
+        // encoding specification
+        dst = new uint16_t[buflen / 2];
+        for (size_t i = 0; i < buflen / 2; i++) {
+          dst[i] = (out[i] << 8) | (out[i] >> 8);
+        }
+        out = dst;
+      }
       if (buflen < EXTERN_APEX)
-        val = String::NewFromTwoByte(node_isolate,
+        val = String::NewFromTwoByte(isolate,
                                      out,
                                      String::kNormalString,
                                      buflen / 2);
       else
-        val = ExternTwoByteString::NewFromCopy(out, buflen / 2);
+        val = ExternTwoByteString::NewFromCopy(isolate, out, buflen / 2);
+      if (dst)
+        delete[] dst;
       break;
     }
 
@@ -732,10 +783,10 @@ Local<Value> StringBytes::Encode(const char* buf,
       assert(written == dlen);
 
       if (dlen < EXTERN_APEX) {
-        val = OneByteString(node_isolate, dst, dlen);
+        val = OneByteString(isolate, dst, dlen);
         delete[] dst;
       } else {
-        val = ExternOneByteString::New(dst, dlen);
+        val = ExternOneByteString::New(isolate, dst, dlen);
       }
       break;
     }
@@ -745,7 +796,7 @@ Local<Value> StringBytes::Encode(const char* buf,
       break;
   }
 
-  return scope.Close(val);
+  return scope.Escape(val);
 }
 
 }  // namespace node

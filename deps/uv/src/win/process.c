@@ -378,7 +378,7 @@ static WCHAR* search_path(const WCHAR *file,
       }
 
       /* Skip the separator that dir_end now points to */
-      if (dir_end != path) {
+      if (dir_end != path || *path == L';') {
         dir_end++;
       }
 
@@ -430,11 +430,10 @@ WCHAR* quote_cmd_arg(const WCHAR *source, WCHAR *target) {
   int quote_hit;
   WCHAR* start;
 
-  /*
-   * Check if the string must be quoted;
-   * if unnecessary, don't do it, it may only confuse older programs.
-   */
   if (len == 0) {
+    /* Need double quotation for empty argument */
+    *(target++) = L'"';
+    *(target++) = L'"';
     return target;
   }
 
@@ -624,7 +623,7 @@ int make_program_env(char* env_block[], WCHAR** dst_ptr) {
   char** env;
   size_t env_len = 1; /* room for closing null */
   int len;
-  int i;
+  size_t i;
   DWORD var_size;
 
   env_var_t required_vars[] = {
@@ -811,6 +810,9 @@ int uv_spawn(uv_loop_t* loop,
   PROCESS_INFORMATION info;
   DWORD process_flags;
 
+  uv_process_init(loop, process);
+  process->exit_cb = options->exit_cb;
+
   if (options->flags & (UV_PROCESS_SETGID | UV_PROCESS_SETUID)) {
     return UV_ENOTSUP;
   }
@@ -826,9 +828,6 @@ int uv_spawn(uv_loop_t* loop,
                               UV_PROCESS_SETUID |
                               UV_PROCESS_WINDOWS_HIDE |
                               UV_PROCESS_WINDOWS_VERBATIM_ARGUMENTS)));
-
-  uv_process_init(loop, process);
-  process->exit_cb = options->exit_cb;
 
   err = uv_utf8_to_utf16_alloc(options->file, &application);
   if (err)
@@ -965,7 +964,7 @@ int uv_spawn(uv_loop_t* loop,
 
   /* Spawn succeeded */
   /* Beyond this point, failure is reported asynchronously. */
-  
+
   process->process_handle = info.hProcess;
   process->pid = info.dwProcessId;
 
@@ -1011,8 +1010,8 @@ int uv_spawn(uv_loop_t* loop,
 
   CloseHandle(info.hThread);
 
-  assert(!err);  
-  
+  assert(!err);
+
   /* Make the handle active. It will remain active until the exit callback */
   /* iis made or the handle is closed, whichever happens first. */
   uv__handle_start(process);

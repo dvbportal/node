@@ -64,6 +64,8 @@ For TCP sockets, `options` argument should be an object which specifies:
 
   - `localAddress`: Local interface to bind to for network connections.
 
+  - `localPort`: Local port to bind to for network connections.
+
   - `family` : Version of IP stack. Defaults to `4`.
 
 For local domain sockets, `options` argument should be an object which
@@ -204,7 +206,8 @@ Stops the server from accepting new connections and keeps existing
 connections. This function is asynchronous, the server is finally
 closed when all connections are ended and the server emits a `'close'`
 event. Optionally, you can pass a callback to listen for the `'close'`
-event.
+event. If present, the callback is invoked with any potential error
+as the first and only argument.
 
 ### server.address()
 
@@ -257,14 +260,14 @@ This becomes `null` when sending a socket to a child with
 `child_process.fork()`. To poll forks and get current number of active
 connections use asynchronous `server.getConnections` instead.
 
-`net.Server` is an [EventEmitter][] with the following events:
-
 ### server.getConnections(callback)
 
 Asynchronously get the number of concurrent connections on the server. Works
 when sockets were sent to forks.
 
 Callback should take two arguments `err` and `count`.
+
+`net.Server` is an [EventEmitter][] with the following events:
 
 ### Event: 'listening'
 
@@ -557,5 +560,6 @@ Returns true if input is a version 6 IP address, otherwise returns false.
 ['end']: #net_event_end
 [EventEmitter]: events.html#events_class_events_eventemitter
 ['listening']: #net_event_listening
+[server.getConnections()]: #net_server_getconnections_callback
 [Readable Stream]: stream.html#stream_readable_stream
 [stream.setEncoding()]: stream.html#stream_stream_setencoding_encoding

@@ -177,7 +177,7 @@ static void (*pFSEventStreamStop)(FSEventStreamRef);
 
 
 /* Runs in UV loop's thread, when there're events to report to handle */
-static void uv__fsevents_cb(uv_async_t* cb, int status) {
+static void uv__fsevents_cb(uv_async_t* cb) {
   uv_fs_event_t* handle;
 
   handle = cb->data;
@@ -795,7 +795,7 @@ int uv__fsevents_init(uv_fs_event_t* handle) {
     return err;
 
   /* Get absolute path to file */
-  handle->realpath = realpath(handle->filename, NULL);
+  handle->realpath = realpath(handle->path, NULL);
   if (handle->realpath == NULL)
     return -errno;
   handle->realpath_len = strlen(handle->realpath);

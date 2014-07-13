@@ -19,15 +19,24 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+// O_NONBLOCK is not exported unless _XOPEN_SOURCE >= 500.
+#if defined(_XOPEN_SOURCE) && _XOPEN_SOURCE < 500
+#undef _XOPEN_SOURCE
+#endif
+
+#if !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 500
+#endif
+
 #include "node_constants.h"
 
 #include "uv.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #if !defined(_MSC_VER)
 #include <unistd.h>
 #endif
-#include <fcntl.h>
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -930,6 +939,22 @@ void DefineOpenSSLConstants(Handle<Object> target) {
 
 # endif  // !OPENSSL_NO_ENGINE
 
+#ifdef DH_CHECK_P_NOT_SAFE_PRIME
+    NODE_DEFINE_CONSTANT(target, DH_CHECK_P_NOT_SAFE_PRIME);
+#endif
+
+#ifdef DH_CHECK_P_NOT_PRIME
+    NODE_DEFINE_CONSTANT(target, DH_CHECK_P_NOT_PRIME);
+#endif
+
+#ifdef DH_UNABLE_TO_CHECK_GENERATOR
+    NODE_DEFINE_CONSTANT(target, DH_UNABLE_TO_CHECK_GENERATOR);
+#endif
+
+#ifdef DH_NOT_SUITABLE_GENERATOR
+    NODE_DEFINE_CONSTANT(target, DH_NOT_SUITABLE_GENERATOR);
+#endif
+
 #ifdef OPENSSL_NPN_NEGOTIATED
 #define NPN_ENABLED 1
     NODE_DEFINE_CONSTANT(target, NPN_ENABLED);
@@ -1006,6 +1031,10 @@ void DefineSystemConstants(Handle<Object> target) {
   NODE_DEFINE_CONSTANT(target, O_DIRECT);
 #endif
 
+#ifdef O_NONBLOCK
+  NODE_DEFINE_CONSTANT(target, O_NONBLOCK);
+#endif
+
 #ifdef S_IRWXU
   NODE_DEFINE_CONSTANT(target, S_IRWXU);
 #endif
@@ -1055,12 +1084,17 @@ void DefineSystemConstants(Handle<Object> target) {
 #endif
 }
 
+void DefineUVConstants(Handle<Object> target) {
+  NODE_DEFINE_CONSTANT(target, UV_UDP_REUSEADDR);
+}
+
 void DefineConstants(Handle<Object> target) {
   DefineErrnoConstants(target);
   DefineWindowsErrorConstants(target);
   DefineSignalConstants(target);
   DefineOpenSSLConstants(target);
   DefineSystemConstants(target);
+  DefineUVConstants(target);
 }
 
 }  // namespace node

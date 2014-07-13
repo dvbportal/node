@@ -23,6 +23,7 @@
 #define SRC_ENV_INL_H_
 
 #include "env.h"
+#include "node.h"
 #include "util.h"
 #include "util-inl.h"
 #include "uv.h"
@@ -33,12 +34,51 @@
 
 namespace node {
 
+inline Environment::GCInfo::GCInfo()
+    : type_(static_cast<v8::GCType>(0)),
+      flags_(static_cast<v8::GCCallbackFlags>(0)),
+      timestamp_(0) {
+}
+
+inline Environment::GCInfo::GCInfo(v8::Isolate* isolate,
+                                   v8::GCType type,
+                                   v8::GCCallbackFlags flags,
+                                   uint64_t timestamp)
+    : type_(type),
+      flags_(flags),
+      timestamp_(timestamp) {
+  isolate->GetHeapStatistics(&stats_);
+}
+
+inline v8::GCType Environment::GCInfo::type() const {
+  return type_;
+}
+
+inline v8::GCCallbackFlags Environment::GCInfo::flags() const {
+  return flags_;
+}
+
+inline v8::HeapStatistics* Environment::GCInfo::stats() const {
+  // TODO(bnoordhuis) Const-ify once https://codereview.chromium.org/63693005
+  // lands and makes it way into a stable release.
+  return const_cast<v8::HeapStatistics*>(&stats_);
+}
+
+inline uint64_t Environment::GCInfo::timestamp() const {
+  return timestamp_;
+}
+
+inline Environment::IsolateData* Environment::IsolateData::Get(
+    v8::Isolate* isolate) {
+  return static_cast<IsolateData*>(isolate->GetData(kIsolateSlot));
+}
+
 inline Environment::IsolateData* Environment::IsolateData::GetOrCreate(
     v8::Isolate* isolate) {
-  IsolateData* isolate_data = static_cast<IsolateData*>(isolate->GetData());
+  IsolateData* isolate_data = Get(isolate);
   if (isolate_data == NULL) {
     isolate_data = new IsolateData(isolate);
-    isolate->SetData(isolate_data);
+    isolate->SetData(kIsolateSlot, isolate_data);
   }
   isolate_data->ref_count_ += 1;
   return isolate_data;
@@ -46,7 +86,7 @@ inline Environment::IsolateData* Environment::IsolateData::GetOrCreate(
 
 inline void Environment::IsolateData::Put() {
   if (--ref_count_ == 0) {
-    isolate()->SetData(NULL);
+    isolate()->SetData(kIsolateSlot, NULL);
     delete this;
   }
 }
@@ -59,6 +99,7 @@ inline Environment::IsolateData::IsolateData(v8::Isolate* isolate)
     PER_ISOLATE_STRING_PROPERTIES(V)
 #undef V
     ref_count_(0) {
+  QUEUE_INIT(&gc_tracker_queue_);
 }
 
 inline uv_loop_t* Environment::IsolateData::event_loop() const {
@@ -84,6 +125,10 @@ inline int Environment::AsyncListener::fields_count() const {
 
 inline bool Environment::AsyncListener::has_listener() const {
   return fields_[kHasListener] > 0;
+}
+
+inline uint32_t Environment::AsyncListener::watched_providers() const {
+  return fields_[kWatchedProviders];
 }
 
 inline Environment::DomainFlag::DomainFlag() {
@@ -145,8 +190,12 @@ inline void Environment::TickInfo::set_last_threw(bool value) {
 
 inline Environment* Environment::New(v8::Local<v8::Context> context) {
   Environment* env = new Environment(context);
-  context->SetAlignedPointerInEmbedderData(kContextEmbedderDataIndex, env);
+  env->AssignToContext(context);
   return env;
+}
+
+inline void Environment::AssignToContext(v8::Local<v8::Context> context) {
+  context->SetAlignedPointerInEmbedderData(kContextEmbedderDataIndex, this);
 }
 
 inline Environment* Environment::GetCurrent(v8::Isolate* isolate) {
@@ -180,18 +229,22 @@ inline Environment::Environment(v8::Local<v8::Context> context)
       isolate_data_(IsolateData::GetOrCreate(context->GetIsolate())),
       using_smalloc_alloc_cb_(false),
       using_domains_(false),
+      printed_error_(false),
       context_(context->GetIsolate(), context) {
   // We'll be creating new objects so make sure we've entered the context.
   v8::HandleScope handle_scope(isolate());
   v8::Context::Scope context_scope(context);
-  set_binding_cache_object(v8::Object::New());
-  set_module_load_list_array(v8::Array::New());
+  set_binding_cache_object(v8::Object::New(isolate()));
+  set_module_load_list_array(v8::Array::New(isolate()));
   RB_INIT(&cares_task_list_);
+  QUEUE_INIT(&gc_tracker_queue_);
 }
 
 inline Environment::~Environment() {
+  v8::HandleScope handle_scope(isolate());
+
   context()->SetAlignedPointerInEmbedderData(kContextEmbedderDataIndex, NULL);
-#define V(PropertyName, TypeName) PropertyName ## _.Dispose();
+#define V(PropertyName, TypeName) PropertyName ## _.Reset();
   ENVIRONMENT_STRONG_PERSISTENT_PROPERTIES(V)
 #undef V
   isolate_data()->Put();
@@ -210,6 +263,11 @@ inline bool Environment::has_async_listener() const {
   return const_cast<Environment*>(this)->async_listener()->has_listener();
 }
 
+inline uint32_t Environment::watched_providers() const {
+  // The const_cast is okay, it doesn't violate conceptual const-ness.
+  return const_cast<Environment*>(this)->async_listener()->watched_providers();
+}
+
 inline bool Environment::in_domain() const {
   // The const_cast is okay, it doesn't violate conceptual const-ness.
   return using_domains() &&
@@ -218,7 +276,7 @@ inline bool Environment::in_domain() const {
 
 inline Environment* Environment::from_immediate_check_handle(
     uv_check_t* handle) {
-  return CONTAINER_OF(handle, Environment, immediate_check_handle_);
+  return ContainerOf(&Environment::immediate_check_handle_, handle);
 }
 
 inline uv_check_t* Environment::immediate_check_handle() {
@@ -231,7 +289,7 @@ inline uv_idle_t* Environment::immediate_idle_handle() {
 
 inline Environment* Environment::from_idle_prepare_handle(
     uv_prepare_t* handle) {
-  return CONTAINER_OF(handle, Environment, idle_prepare_handle_);
+  return ContainerOf(&Environment::idle_prepare_handle_, handle);
 }
 
 inline uv_prepare_t* Environment::idle_prepare_handle() {
@@ -239,7 +297,7 @@ inline uv_prepare_t* Environment::idle_prepare_handle() {
 }
 
 inline Environment* Environment::from_idle_check_handle(uv_check_t* handle) {
-  return CONTAINER_OF(handle, Environment, idle_check_handle_);
+  return ContainerOf(&Environment::idle_check_handle_, handle);
 }
 
 inline uv_check_t* Environment::idle_check_handle() {
@@ -278,8 +336,16 @@ inline void Environment::set_using_domains(bool value) {
   using_domains_ = value;
 }
 
+inline bool Environment::printed_error() const {
+  return printed_error_;
+}
+
+inline void Environment::set_printed_error(bool value) {
+  printed_error_ = value;
+}
+
 inline Environment* Environment::from_cares_timer_handle(uv_timer_t* handle) {
-  return CONTAINER_OF(handle, Environment, cares_timer_handle_);
+  return ContainerOf(&Environment::cares_timer_handle_, handle);
 }
 
 inline uv_timer_t* Environment::cares_timer_handle() {
@@ -301,6 +367,57 @@ inline ares_task_list* Environment::cares_task_list() {
 
 inline Environment::IsolateData* Environment::isolate_data() const {
   return isolate_data_;
+}
+
+// this would have been a template function were it not for the fact that g++
+// sometimes fails to resolve it...
+#define THROW_ERROR(fun)                                                      \
+  do {                                                                        \
+    v8::HandleScope scope(isolate);                                           \
+    isolate->ThrowException(fun(OneByteString(isolate, errmsg)));             \
+  }                                                                           \
+  while (0)
+
+inline void Environment::ThrowError(v8::Isolate* isolate, const char* errmsg) {
+  THROW_ERROR(v8::Exception::Error);
+}
+
+inline void Environment::ThrowTypeError(v8::Isolate* isolate,
+                                        const char* errmsg) {
+  THROW_ERROR(v8::Exception::TypeError);
+}
+
+inline void Environment::ThrowRangeError(v8::Isolate* isolate,
+                                         const char* errmsg) {
+  THROW_ERROR(v8::Exception::RangeError);
+}
+
+inline void Environment::ThrowError(const char* errmsg) {
+  ThrowError(isolate(), errmsg);
+}
+
+inline void Environment::ThrowTypeError(const char* errmsg) {
+  ThrowTypeError(isolate(), errmsg);
+}
+
+inline void Environment::ThrowRangeError(const char* errmsg) {
+  ThrowRangeError(isolate(), errmsg);
+}
+
+inline void Environment::ThrowErrnoException(int errorno,
+                                             const char* syscall,
+                                             const char* message,
+                                             const char* path) {
+  isolate()->ThrowException(
+      ErrnoException(isolate(), errorno, syscall, message, path));
+}
+
+inline void Environment::ThrowUVException(int errorno,
+                                          const char* syscall,
+                                          const char* message,
+                                          const char* path) {
+  isolate()->ThrowException(
+      UVException(isolate(), errorno, syscall, message, path));
 }
 
 #define V(PropertyName, StringValue)                                          \

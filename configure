@@ -204,6 +204,11 @@ parser.add_option('--tag',
     dest='tag',
     help='custom build tag')
 
+parser.add_option('--v8-options',
+    action='store',
+    dest='v8_options',
+    help='v8 options to pass, see `node --v8-options` for examples.')
+
 parser.add_option('--with-arm-float-abi',
     action='store',
     dest='arm_float_abi',
@@ -397,7 +402,8 @@ def host_arch_cc():
 def host_arch_win():
   """Host architecture check using environ vars (better way to do this?)"""
 
-  arch = os.environ.get('PROCESSOR_ARCHITECTURE', 'x86')
+  observed_arch = os.environ.get('PROCESSOR_ARCHITECTURE', 'x86')
+  arch = os.environ.get('PROCESSOR_ARCHITEW6432', observed_arch)
 
   matchup = {
     'AMD64'  : 'x64',
@@ -451,6 +457,9 @@ def configure_node(o):
   o['variables']['host_arch'] = host_arch
   o['variables']['target_arch'] = target_arch
 
+  if target_arch != host_arch and not options.without_snapshot:
+    o['variables']['want_separate_host_toolset'] = 1
+
   if target_arch == 'arm':
     configure_arm(o)
 
@@ -464,13 +473,15 @@ def configure_node(o):
   if not is_clang and cc_version < (4,0,0):
     o['variables']['visibility'] = ''
 
-  if flavor in ('solaris', 'mac', 'linux'):
+  if flavor in ('solaris', 'mac', 'linux', 'freebsd'):
     use_dtrace = not options.without_dtrace
-    # Don't enable by default on linux, it needs the sdt-devel package.
+    # Don't enable by default on linux and freebsd
+    if flavor in ('linux', 'freebsd'):
+      use_dtrace = options.with_dtrace
+
     if flavor == 'linux':
       if options.systemtap_includes:
         o['include_dirs'] += [options.systemtap_includes]
-      use_dtrace = options.with_dtrace
     o['variables']['node_use_dtrace'] = b(use_dtrace)
     o['variables']['uv_use_dtrace'] = b(use_dtrace)
     o['variables']['uv_parent_path'] = '/deps/uv/'
@@ -510,6 +521,9 @@ def configure_node(o):
     o['variables']['node_tag'] = '-' + options.tag
   else:
     o['variables']['node_tag'] = ''
+
+  if options.v8_options:
+    o['variables']['node_v8_options'] = options.v8_options.replace('"', '\\"')
 
 
 def configure_libz(o):
@@ -560,6 +574,9 @@ def configure_libuv(o):
   # assume shared libuv if one of these is set?
   if options.shared_libuv_libpath:
     o['libraries'] += ['-L%s' % options.shared_libuv_libpath]
+  else:
+    o['variables']['uv_library'] = 'static_library'
+
   if options.shared_libuv_libname:
     o['libraries'] += ['-l%s' % options.shared_libuv_libname]
   elif options.shared_libuv:

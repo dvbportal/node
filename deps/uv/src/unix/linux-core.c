@@ -36,21 +36,24 @@
 #include <fcntl.h>
 #include <time.h>
 
-#ifndef __ANDROID__
 #define HAVE_IFADDRS_H 1
-#endif
 
 #ifdef __UCLIBC__
 # if __UCLIBC_MAJOR__ < 0 || __UCLIBC_MINOR__ < 9 || __UCLIBC_SUBLEVEL__ < 32
 #  undef HAVE_IFADDRS_H
 # endif
 #endif
+
 #ifdef HAVE_IFADDRS_H
-# include <ifaddrs.h>
+# if defined(__ANDROID__)
+#  include "android-ifaddrs.h"
+# else
+#  include <ifaddrs.h>
+# endif
 # include <sys/socket.h>
 # include <net/ethernet.h>
 # include <linux/if_packet.h>
-#endif
+#endif /* HAVE_IFADDRS_H */
 
 /* Available from 2.6.32 onwards. */
 #ifndef CLOCK_MONOTONIC_COARSE
@@ -107,6 +110,7 @@ void uv__platform_loop_delete(uv_loop_t* loop) {
 
 void uv__platform_invalidate_fd(uv_loop_t* loop, int fd) {
   struct uv__epoll_event* events;
+  struct uv__epoll_event dummy;
   uintptr_t i;
   uintptr_t nfds;
 
@@ -114,13 +118,20 @@ void uv__platform_invalidate_fd(uv_loop_t* loop, int fd) {
 
   events = (struct uv__epoll_event*) loop->watchers[loop->nwatchers];
   nfds = (uintptr_t) loop->watchers[loop->nwatchers + 1];
-  if (events == NULL)
-    return;
+  if (events != NULL)
+    /* Invalidate events with same file descriptor */
+    for (i = 0; i < nfds; i++)
+      if ((int) events[i].data == fd)
+        events[i].data = -1;
 
-  /* Invalidate events with same file descriptor */
-  for (i = 0; i < nfds; i++)
-    if ((int) events[i].data == fd)
-      events[i].data = -1;
+  /* Remove the file descriptor from the epoll.
+   * This avoids a problem where the same file description remains open
+   * in another process, causing repeated junk epoll events.
+   *
+   * We pass in a dummy epoll_event, to work around a bug in old kernels.
+   */
+  if (loop->backend_fd >= 0)
+    uv__epoll_ctl(loop->backend_fd, UV__EPOLL_CTL_DEL, fd, &dummy);
 }
 
 
@@ -635,9 +646,11 @@ static int read_times(unsigned int numcpus, uv_cpu_info_t* ci) {
 
     /* skip "cpu<num> " marker */
     {
-      unsigned int n = num;
+      unsigned int n;
+      int r = sscanf(buf, "cpu%u ", &n);
+      assert(r == 1);
+      (void) r;  /* silence build warning */
       for (len = sizeof("cpu0"); n /= 10; len++);
-      assert(sscanf(buf, "cpu%u ", &n) == 1 && n == num);
     }
 
     /* Line contains user, nice, system, idle, iowait, irq, softirq, steal,
@@ -664,6 +677,7 @@ static int read_times(unsigned int numcpus, uv_cpu_info_t* ci) {
     ci[num++].cpu_times = ts;
   }
   fclose(fp);
+  assert(num == numcpus);
 
   return 0;
 }

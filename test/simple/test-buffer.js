@@ -24,6 +24,7 @@ var assert = require('assert');
 
 var Buffer = require('buffer').Buffer;
 var SlowBuffer = require('buffer').SlowBuffer;
+var smalloc = require('smalloc');
 
 // counter to ensure unique value is always copied
 var cntr = 0;
@@ -684,25 +685,6 @@ assert.equal(0xad, b[1]);
 assert.equal(0xbe, b[2]);
 assert.equal(0xef, b[3]);
 
-// testing invalid encoding on Buffer.toString
-caught_error = null;
-try {
-  var copied = b.toString('invalid');
-} catch (err) {
-  caught_error = err;
-}
-assert.strictEqual('Unknown encoding: invalid', caught_error.message);
-
-// testing invalid encoding on Buffer.write
-caught_error = null;
-try {
-  var copied = b.write('some string', 0, 5, 'invalid');
-} catch (err) {
-  caught_error = err;
-}
-assert.strictEqual('Unknown encoding: invalid', caught_error.message);
-
-
 // #1210 Test UTF-8 string includes null character
 var buf = new Buffer('\0');
 assert.equal(buf.length, 1);
@@ -786,6 +768,18 @@ assert.equal(7, b.writeUInt8(0, 6));
 assert.equal(8, b.writeInt8(0, 7));
 assert.equal(16, b.writeDoubleLE(0, 8));
 
+// test unmatched surrogates not producing invalid utf8 output
+// ef bf bd = utf-8 representation of unicode replacement character
+// see https://codereview.chromium.org/121173009/
+buf = new Buffer('ab\ud800cd', 'utf8');
+assert.equal(buf[0], 0x61);
+assert.equal(buf[1], 0x62);
+assert.equal(buf[2], 0xef);
+assert.equal(buf[3], 0xbf);
+assert.equal(buf[4], 0xbd);
+assert.equal(buf[5], 0x63);
+assert.equal(buf[6], 0x64);
+
 // test for buffer overrun
 buf = new Buffer([0, 0, 0, 0, 0]); // length: 5
 var sub = buf.slice(0, 4);         // length: 4
@@ -855,6 +849,16 @@ Buffer(Buffer(0), 0, 0);
   }));
 })();
 
+// issue GH-7849
+(function() {
+  var buf = new Buffer('test');
+  var json = JSON.stringify(buf);
+  var obj = JSON.parse(json);
+  var copy = new Buffer(obj);
+
+  assert(buf.equals(copy));
+})();
+
 // issue GH-4331
 assert.throws(function() {
   new Buffer(0xFFFFFFFF);
@@ -913,6 +917,13 @@ var buf = new Buffer(0);
 assert.throws(function() { buf.readUInt8(0); }, RangeError);
 assert.throws(function() { buf.readInt8(0); }, RangeError);
 
+var buf = new Buffer([0xFF]);
+
+assert.equal(buf.readUInt8(0), 255);
+assert.equal(buf.readInt8(0), -1);
+
+
+
 [16, 32].forEach(function(bits) {
   var buf = new Buffer(bits / 8 - 1);
 
@@ -931,6 +942,22 @@ assert.throws(function() { buf.readInt8(0); }, RangeError);
   assert.throws(function() { buf['readInt' + bits + 'LE'](0); },
                 RangeError,
                 'readInt' + bits + 'LE()');
+});
+
+[16, 32].forEach(function(bits) {
+  var buf = new Buffer([0xFF, 0xFF, 0xFF, 0xFF]);
+
+  assert.equal(buf['readUInt' + bits + 'BE'](0),
+                (0xFFFFFFFF >>> (32 - bits)));
+
+  assert.equal(buf['readUInt' + bits + 'LE'](0),
+                (0xFFFFFFFF >>> (32 - bits)));
+
+  assert.equal(buf['readInt' + bits + 'BE'](0),
+                (0xFFFFFFFF >> (32 - bits)));
+
+  assert.equal(buf['readInt' + bits + 'LE'](0),
+                (0xFFFFFFFF >> (32 - bits)));
 });
 
 // test Buffer slice
@@ -982,14 +1009,67 @@ assert.throws(function() {
   }
 })();
 
-// Test Buffers to ArrayBuffers
+
+assert.throws(function () {
+  new Buffer(smalloc.kMaxLength + 1);
+}, RangeError);
+
+assert.throws(function () {
+  new SlowBuffer(smalloc.kMaxLength + 1);
+}, RangeError);
+
+// Test truncation after decode
+var crypto = require('crypto');
+
+var b1 = new Buffer('YW55=======', 'base64');
+var b2 = new Buffer('YW55', 'base64');
+
+assert.equal(
+  crypto.createHash('sha1').update(b1).digest('hex'),
+  crypto.createHash('sha1').update(b2).digest('hex')
+);
+
+// Test Compare
+var b = new Buffer(1).fill('a');
+var c = new Buffer(1).fill('c');
+var d = new Buffer(2).fill('aa');
+
+assert.equal(b.compare(c), -1);
+assert.equal(c.compare(d), 1);
+assert.equal(d.compare(b), 1);
+assert.equal(b.compare(d), -1);
+
+assert.equal(Buffer.compare(b, c), -1);
+assert.equal(Buffer.compare(c, d), 1);
+assert.equal(Buffer.compare(d, b), 1);
+assert.equal(Buffer.compare(b, d), -1);
+
+assert.throws(function() {
+  var b = new Buffer(1);
+  Buffer.compare(b, 'abc');
+});
+
+assert.throws(function() {
+  var b = new Buffer(1);
+  Buffer.compare('abc', b);
+});
+
+assert.throws(function() {
+  var b = new Buffer(1);
+  b.compare('abc');
+});
+
+// Test Equals
 var b = new Buffer(5).fill('abcdf');
-var c = b.toArrayBuffer();
-assert.equal(c.byteLength, 5);
-assert.equal(Object.prototype.toString.call(c), '[object ArrayBuffer]');
-var d = new Uint8Array(c);
-for (var i = 0; i < 5; i++)
-  assert.equal(d[i], b[i]);
-b.fill('ghijk');
-for (var i = 0; i < 5; i++)
-  assert.notEqual(d[i], b[i]);
+var c = new Buffer(5).fill('abcdf');
+var d = new Buffer(5).fill('abcde');
+var e = new Buffer(6).fill('abcdef');
+
+assert.ok(b.equals(c));
+assert.ok(!c.equals(d));
+assert.ok(!d.equals(e));
+
+assert.throws(function() {
+  var b = new Buffer(1);
+  b.equals('abc');
+});
